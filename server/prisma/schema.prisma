@@ -1,0 +1,88 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  phone        String   @unique
+  passwordHash String
+  role         String   @default("MEMBER")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  loyaltyAccount LoyaltyAccount?
+  purchases      Purchase[]
+  redemptions    Redemption[]
+  pointLedger    PointLedger[]
+}
+
+model LoyaltyAccount {
+  id                   String   @id @default(cuid())
+  userId               String   @unique
+  tier                 String   @default("BRONZE")
+  currentPoints        Int      @default(0)
+  lifetimeEarnedPoints Int      @default(0)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Purchase {
+  id            String   @id @default(cuid())
+  memberId      String
+  amountPaise   Int
+  pointsEarned  Int
+  tierUsed      String
+  receiptNumber String?
+  createdAt     DateTime @default(now())
+
+  member User @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  ledger PointLedger[]
+}
+
+model Reward {
+  id          String   @id @default(cuid())
+  name        String
+  description String
+  pointsCost  Int
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  redemptions Redemption[]
+}
+
+model Redemption {
+  id          String   @id @default(cuid())
+  memberId    String
+  rewardId    String
+  pointsSpent Int
+  createdAt   DateTime @default(now())
+
+  member User @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  reward Reward @relation(fields: [rewardId], references: [id], onDelete: Restrict)
+  ledger PointLedger[]
+}
+
+model PointLedger {
+  id           String   @id @default(cuid())
+  memberId     String
+  type         String
+  pointsDelta  Int
+  balanceAfter Int
+  purchaseId   String?
+  redemptionId String?
+  createdAt    DateTime @default(now())
+
+  member User @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  purchase Purchase? @relation(fields: [purchaseId], references: [id], onDelete: SetNull)
+  redemption Redemption? @relation(fields: [redemptionId], references: [id], onDelete: SetNull)
+}
