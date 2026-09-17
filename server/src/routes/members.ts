@@ -5,6 +5,8 @@ import { requireAuth, requireSelfOrStaff, requireStaff } from '../middleware/aut
 import { memberIdParamSchema, memberSearchSchema, purchaseSchema, redemptionSchema } from '../validation.js';
 import { calculateEarnedPoints, getTierForLifetimePoints, type TierName } from '../config.js';
 import { normalizePhoneForSearch } from '../lib/normalize.js';
+import { addDays, appClock } from '../lib/clock.js';
+import { calculateCurrentTierAndProgress, consumeAvailablePoints, maybeCreateTierUpgradeEvent, POINTS_EXPIRY_DAYS } from '../lib/loyalty.js';
 
 const router = Router();
 
@@ -115,13 +117,7 @@ router.get('/:id/summary', requireAuth, requireSelfOrStaff, async (req, res, nex
     if (!member || !member.loyaltyAccount) throw new AppError('Member not found', 404);
 
     const lifetime = member.loyaltyAccount.lifetimeEarnedPoints;
-    let progress: Record<string, unknown> = { threshold: 0, current: lifetime, remaining: 0, nextTier: null };
-
-    if (member.loyaltyAccount.tier === 'BRONZE') {
-      progress = { threshold: 500, current: lifetime, remaining: Math.max(0, 500 - lifetime), nextTier: 'SILVER' };
-    } else if (member.loyaltyAccount.tier === 'SILVER') {
-      progress = { threshold: 1500, current: lifetime, remaining: Math.max(0, 1500 - lifetime), nextTier: 'GOLD' };
-    }
+    const progress = calculateCurrentTierAndProgress(lifetime);
 
     res.json({
       memberId: member.id,
@@ -129,8 +125,13 @@ router.get('/:id/summary', requireAuth, requireSelfOrStaff, async (req, res, nex
       tier: member.loyaltyAccount.tier,
       currentPoints: member.loyaltyAccount.currentPoints,
       lifetimeEarnedPoints: lifetime,
-      nextTier: member.loyaltyAccount.tier === 'BRONZE' ? 'SILVER' : member.loyaltyAccount.tier === 'SILVER' ? 'GOLD' : null,
-      progress,
+      nextTier: progress.nextTier,
+      progress: {
+        threshold: progress.threshold,
+        current: lifetime,
+        remaining: progress.remaining,
+        nextTier: progress.nextTier,
+      },
     });
   } catch (error) {
     next(error);
@@ -181,9 +182,7 @@ router.post('/:id/purchases', requireAuth, requireSelfOrStaff, async (req, res, 
 
     const tierBefore = member.loyaltyAccount.tier as TierName;
     const pointsEarned = calculateEarnedPoints(body.amountPaise, tierBefore);
-    const newLifetime = member.loyaltyAccount.lifetimeEarnedPoints + pointsEarned;
-    const newTier = getTierForLifetimePoints(newLifetime);
-    const newBalance = member.loyaltyAccount.currentPoints + pointsEarned;
+    const now = appClock.getNow();
 
     const purchase = await prisma.$transaction(async (tx) => {
       const createdPurchase = await tx.purchase.create({
@@ -196,13 +195,32 @@ router.post('/:id/purchases', requireAuth, requireSelfOrStaff, async (req, res, 
         },
       });
 
+      const previousTier = tierBefore;
+      const newLifetime = member.loyaltyAccount!.lifetimeEarnedPoints + pointsEarned;
+      const newTier = getTierForLifetimePoints(newLifetime);
+      const currentPoints = member.loyaltyAccount!.currentPoints;
+      const nextBalance = currentPoints + pointsEarned;
+
+      await tx.pointLot.create({
+        data: {
+          memberId: params.id,
+          sourcePurchaseId: createdPurchase.id,
+          originalPoints: pointsEarned,
+          remainingPoints: pointsEarned,
+          earnedAt: now,
+          expiresAt: addDays(now, POINTS_EXPIRY_DAYS),
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+
       await tx.loyaltyAccount.update({
         where: { userId: params.id },
         data: {
-          currentPoints: newBalance,
+          currentPoints: nextBalance,
           lifetimeEarnedPoints: newLifetime,
           tier: newTier,
-          updatedAt: new Date(),
+          updatedAt: now,
         },
       });
 
@@ -211,14 +229,19 @@ router.post('/:id/purchases', requireAuth, requireSelfOrStaff, async (req, res, 
           memberId: params.id,
           type: 'EARN',
           pointsDelta: pointsEarned,
-          balanceAfter: newBalance,
+          balanceAfter: nextBalance,
           purchaseId: createdPurchase.id,
+          createdAt: now,
         },
       });
 
+      if (newTier !== previousTier) {
+        await maybeCreateTierUpgradeEvent(tx, params.id, previousTier, newTier, now);
+      }
+
       return {
         purchase: createdPurchase,
-        updatedBalance: newBalance,
+        updatedBalance: nextBalance,
         tier: newTier,
         pointsEarned,
       };
@@ -271,11 +294,35 @@ router.post('/:id/redemptions', requireAuth, requireSelfOrStaff, async (req, res
       throw new AppError('Reward unavailable', 404);
     }
 
-    if (member.loyaltyAccount.currentPoints < reward.pointsCost) {
-      throw new AppError('Insufficient points for redemption', 400);
-    }
-
+    const now = appClock.getNow();
     const result = await prisma.$transaction(async (tx) => {
+      const account = await tx.loyaltyAccount.findUnique({ where: { userId: params.id } });
+      const currentBalance = account?.currentPoints ?? 0;
+      const existingLots = await tx.pointLot.findMany({
+        where: { memberId: params.id, remainingPoints: { gt: 0 } },
+        orderBy: [{ expiresAt: 'asc' }, { earnedAt: 'asc' }],
+      });
+      const lotBalance = existingLots.reduce((sum, lot) => sum + lot.remainingPoints, 0);
+      const effectiveBalance = Math.max(currentBalance, lotBalance);
+
+      if (effectiveBalance < reward.pointsCost) {
+        throw new AppError('Insufficient points for redemption', 400);
+      }
+
+      if (currentBalance > lotBalance && currentBalance > 0) {
+        await tx.pointLot.create({
+          data: {
+            memberId: params.id,
+            originalPoints: currentBalance - lotBalance,
+            remainingPoints: currentBalance - lotBalance,
+            earnedAt: now,
+            expiresAt: addDays(now, POINTS_EXPIRY_DAYS),
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+      }
+
       const createdRedemption = await tx.redemption.create({
         data: {
           memberId: params.id,
@@ -284,13 +331,11 @@ router.post('/:id/redemptions', requireAuth, requireSelfOrStaff, async (req, res
         },
       });
 
-      const newBalance = member.loyaltyAccount!.currentPoints - reward.pointsCost;
+      const { consumed } = await consumeAvailablePoints(params.id, reward.pointsCost, tx, now);
+      const newBalance = Math.max(0, currentBalance - reward.pointsCost);
       await tx.loyaltyAccount.update({
         where: { userId: params.id },
-        data: {
-          currentPoints: newBalance,
-          updatedAt: new Date(),
-        },
+        data: { currentPoints: newBalance, updatedAt: now },
       });
 
       await tx.pointLedger.create({
@@ -300,10 +345,11 @@ router.post('/:id/redemptions', requireAuth, requireSelfOrStaff, async (req, res
           pointsDelta: -reward.pointsCost,
           balanceAfter: newBalance,
           redemptionId: createdRedemption.id,
+          createdAt: now,
         },
       });
 
-      return { redemption: createdRedemption, updatedBalance: newBalance, tier: member.loyaltyAccount!.tier };
+      return { redemption: createdRedemption, updatedBalance: newBalance, tier: member.loyaltyAccount!.tier, consumed };
     });
 
     res.status(201).json({

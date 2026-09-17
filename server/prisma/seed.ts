@@ -46,6 +46,11 @@ async function main() {
     },
   });
 
+  await prisma.redemption.deleteMany();
+  await prisma.purchase.deleteMany();
+  await prisma.pointLedger.deleteMany();
+  await prisma.notificationOutbox.deleteMany();
+  await prisma.pointLot.deleteMany();
   await prisma.reward.deleteMany();
   await prisma.reward.createMany({
     data: rewardSeed.map((reward) => ({

@@ -9,24 +9,39 @@ export const config = {
   nodeEnv: process.env.NODE_ENV || 'development',
 };
 
-export type TierName = 'BRONZE' | 'SILVER' | 'GOLD';
+export type TierName = 'BRONZE' | 'SILVER' | 'GOLD' | 'PLATINUM';
 
 export const loyaltySettings = {
   tierPoints: {
     BRONZE: 100,
     SILVER: 80,
     GOLD: 60,
+    PLATINUM: 0,
   },
 };
 
+export const tierThresholds = {
+  BRONZE: 0,
+  SILVER: 500,
+  GOLD: 1500,
+  PLATINUM: 5000,
+};
+
 export function getTierForLifetimePoints(lifetimePoints: number): TierName {
-  if (lifetimePoints >= 1500) return 'GOLD';
-  if (lifetimePoints >= 500) return 'SILVER';
+  if (lifetimePoints >= tierThresholds.PLATINUM) return 'PLATINUM';
+  if (lifetimePoints >= tierThresholds.GOLD) return 'GOLD';
+  if (lifetimePoints >= tierThresholds.SILVER) return 'SILVER';
   return 'BRONZE';
 }
 
 export function calculateEarnedPoints(amountPaise: number, tier: TierName): number {
   if (amountPaise <= 0) return 0;
+
+  if (tier === 'PLATINUM') {
+    const raw = Math.floor((amountPaise * 3) / 1000);
+    return raw > 0 ? raw : 1;
+  }
+
   const rupees = Math.floor(amountPaise / 100);
   const pointsPerRupee = loyaltySettings.tierPoints[tier];
   const raw = Math.floor(rupees / pointsPerRupee);

@@ -187,6 +187,7 @@ describe('BeanBalance API', () => {
       .send({ identifier: 'member@beanbalance.com', password: 'Member123!' });
 
     const user = await prisma.user.findUnique({ where: { email: 'member@beanbalance.com' }, include: { loyaltyAccount: true } });
+    await prisma.pointLot.deleteMany({ where: { memberId: user!.id } });
     await prisma.loyaltyAccount.update({ where: { userId: user!.id }, data: { currentPoints: 0 } });
 
     const rewards = await prisma.reward.findMany();
@@ -225,5 +226,106 @@ describe('BeanBalance API', () => {
       .set('Authorization', `Bearer ${memberLogin.body.token}`);
 
     expect(memberAccess.status).toBe(403);
+  });
+
+  it('awards Platinum points at the correct rate and tier threshold', async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ identifier: 'staff@beanbalance.com', password: 'Staff123!' });
+
+    const member = await prisma.user.create({
+      data: {
+        name: 'Platinum Member',
+        email: 'platinum@example.com',
+        phone: '9000000201',
+        passwordHash: await bcrypt.hash('Pass1234!', 10),
+        role: 'MEMBER',
+        loyaltyAccount: {
+          create: { tier: 'PLATINUM', currentPoints: 0, lifetimeEarnedPoints: 5000 },
+        },
+      },
+    });
+
+    const purchase = await request(app)
+      .post(`/api/members/${member.id}/purchases`)
+      .set('Authorization', `Bearer ${login.body.token}`)
+      .send({ amountPaise: 10000, receiptNumber: 'P-100' });
+
+    expect(purchase.status).toBe(201);
+    expect(purchase.body.pointsEarned).toBe(30);
+    expect(purchase.body.tier).toBe('PLATINUM');
+  });
+
+  it('expires point lots after 90 days and keeps the balance non-negative', async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ identifier: 'staff@beanbalance.com', password: 'Staff123!' });
+
+    const member = await prisma.user.create({
+      data: {
+        name: 'Expiring Member',
+        email: 'expiring@example.com',
+        phone: '9000000202',
+        passwordHash: await bcrypt.hash('Pass1234!', 10),
+        role: 'MEMBER',
+        loyaltyAccount: {
+          create: { tier: 'BRONZE', currentPoints: 0, lifetimeEarnedPoints: 0 },
+        },
+      },
+    });
+
+    await request(app)
+      .post(`/api/members/${member.id}/purchases`)
+      .set('Authorization', `Bearer ${login.body.token}`)
+      .send({ amountPaise: 50000, receiptNumber: 'E-001' });
+
+    const before = await prisma.loyaltyAccount.findUnique({ where: { userId: member.id } });
+    expect(before?.currentPoints).toBeGreaterThan(0);
+
+    const clockSet = await request(app)
+      .post('/api/clock')
+      .send({ advanceDays: 90 });
+
+    expect(clockSet.status).toBe(200);
+    const after = await prisma.loyaltyAccount.findUnique({ where: { userId: member.id } });
+    expect(after?.currentPoints).toBe(0);
+    const ledger = await prisma.pointLedger.findMany({ where: { memberId: member.id, type: 'EXPIRE' } });
+    expect(ledger.length).toBeGreaterThan(0);
+  });
+
+  it('creates a tier-upgrade outbox event for valid member upgrades', async () => {
+    const login = await request(app)
+      .post('/api/auth/login')
+      .send({ identifier: 'staff@beanbalance.com', password: 'Staff123!' });
+
+    const member = await prisma.user.create({
+      data: {
+        name: 'Upgrade Member',
+        email: 'upgrade@example.com',
+        phone: '9000000203',
+        passwordHash: await bcrypt.hash('Pass1234!', 10),
+        role: 'MEMBER',
+        loyaltyAccount: {
+          create: { tier: 'BRONZE', currentPoints: 0, lifetimeEarnedPoints: 4900 },
+        },
+      },
+    });
+
+    const response = await request(app)
+      .post(`/api/members/${member.id}/purchases`)
+      .set('Authorization', `Bearer ${login.body.token}`)
+      .send({ amountPaise: 50000, receiptNumber: 'U-001' });
+
+    expect(response.status).toBe(201);
+    const outbox = await prisma.notificationOutbox.findFirst({ where: { memberId: member.id } });
+    expect(outbox?.eventType).toBe('MEMBER_TIER_UPGRADED');
+    expect(outbox?.newTier).toBe('GOLD');
+
+    const list = await request(app)
+      .get('/api/outbox')
+      .set('Authorization', `Bearer ${login.body.token}`);
+
+    expect(list.status).toBe(200);
+    expect(list.body.events.length).toBeGreaterThan(0);
   });
 });

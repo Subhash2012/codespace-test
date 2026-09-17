@@ -17,10 +17,12 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  loyaltyAccount LoyaltyAccount?
-  purchases      Purchase[]
-  redemptions    Redemption[]
-  pointLedger    PointLedger[]
+  loyaltyAccount   LoyaltyAccount?
+  purchases        Purchase[]
+  redemptions      Redemption[]
+  pointLedger      PointLedger[]
+  pointLots        PointLot[]
+  notificationOutbox NotificationOutbox[]
 }
 
 model LoyaltyAccount {
@@ -46,6 +48,7 @@ model Purchase {
 
   member User @relation(fields: [memberId], references: [id], onDelete: Cascade)
   ledger PointLedger[]
+  pointLots PointLot[]
 }
 
 model Reward {
@@ -72,6 +75,21 @@ model Redemption {
   ledger PointLedger[]
 }
 
+model PointLot {
+  id                String   @id @default(cuid())
+  memberId          String
+  sourcePurchaseId  String?
+  originalPoints    Int
+  remainingPoints   Int
+  earnedAt          DateTime
+  expiresAt         DateTime
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  member User @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  sourcePurchase Purchase? @relation(fields: [sourcePurchaseId], references: [id], onDelete: SetNull)
+}
+
 model PointLedger {
   id           String   @id @default(cuid())
   memberId     String
@@ -85,4 +103,20 @@ model PointLedger {
   member User @relation(fields: [memberId], references: [id], onDelete: Cascade)
   purchase Purchase? @relation(fields: [purchaseId], references: [id], onDelete: SetNull)
   redemption Redemption? @relation(fields: [redemptionId], references: [id], onDelete: SetNull)
+}
+
+model NotificationOutbox {
+  id           String    @id @default(cuid())
+  eventType    String
+  memberId     String
+  previousTier String?
+  newTier      String?
+  payload      String
+  dedupeKey    String    @unique
+  status       String    @default("PENDING")
+  createdAt    DateTime  @default(now())
+  processedAt  DateTime?
+  errorMessage String?
+
+  member User @relation(fields: [memberId], references: [id], onDelete: Cascade)
 }

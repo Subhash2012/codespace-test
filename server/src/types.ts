@@ -1,5 +1,5 @@
 export type UserRole = 'MEMBER' | 'STAFF';
-export type TierType = 'BRONZE' | 'SILVER' | 'GOLD';
+export type TierType = 'BRONZE' | 'SILVER' | 'GOLD' | 'PLATINUM';
 
 export type MemberSummary = {
   id: string;
